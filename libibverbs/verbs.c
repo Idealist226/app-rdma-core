@@ -52,6 +52,10 @@
 #include <net/if.h>
 #include <net/if_arp.h>
 #include "neigh.h"
+#include <fcntl.h>
+#include <sys/mman.h>
+#include "freeflow.h"
+#include "verbs.h"
 
 #undef ibv_query_port
 
@@ -211,9 +215,26 @@ LATEST_SYMVER_FUNC(ibv_query_port, 1_1, "IBVERBS_1.1",
 		   struct ibv_context *context, uint8_t port_num,
 		   struct _compat_ibv_port_attr *port_attr)
 {
-	return __lib_query_port(context, port_num,
-				(struct ibv_port_attr *)port_attr,
-				sizeof(*port_attr));
+	if (PRINT_LOG) {
+		printf("#### ibv_query_port ####\n");
+		fflush(stdout);
+	}
+
+	struct IBV_QUERY_PORT_REQ req;
+	req.port_num = port_num;
+
+	struct IBV_QUERY_PORT_RSP rsp;
+	int rsp_size;
+	request_router(IBV_QUERY_PORT, &req, &rsp, &rsp_size);
+	
+	memcpy(port_attr, &rsp.port_attr, sizeof(struct ibv_port_attr));	
+
+	if (PRINT_LOG) {
+		printf("state=%d, max_mtu=%d, active_mtu=%d\n", port_attr->state, port_attr->max_mtu, port_attr->active_mtu);
+		fflush(stdout);
+	}
+	
+	return 0;
 }
 
 LATEST_SYMVER_FUNC(ibv_query_gid, 1_1, "IBVERBS_1.1",
@@ -280,11 +301,24 @@ LATEST_SYMVER_FUNC(ibv_alloc_pd, 1_1, "IBVERBS_1.1",
 		   struct ibv_pd *,
 		   struct ibv_context *context)
 {
-	struct ibv_pd *pd;
+	struct ibv_pd *pd = calloc(1, sizeof(struct ibv_pd));
 
-	pd = get_ops(context)->alloc_pd(context);
-	if (pd)
-		pd->context = context;
+	if (PRINT_LOG) {
+		printf("#### ibv_alloc_pd ####\n");
+		fflush(stdout);	
+	}
+
+	struct IBV_ALLOC_PD_RSP rsp;
+	int rsp_size;
+	request_router(IBV_ALLOC_PD, NULL, &rsp, &rsp_size);
+
+	pd->handle  = rsp.pd_handle;
+	pd->context = context;
+
+	if (PRINT_LOG) {
+		printf("PD handle = %d\n", pd->handle);
+		fflush(stdout);
+	}
 
 	return pd;
 }
@@ -293,7 +327,20 @@ LATEST_SYMVER_FUNC(ibv_dealloc_pd, 1_1, "IBVERBS_1.1",
 		   int,
 		   struct ibv_pd *pd)
 {
-	return get_ops(pd->context)->dealloc_pd(pd);
+	if (PRINT_LOG) {
+		printf("#### ibv_dealloc_pd ####\n");
+		fflush(stdout);
+	}
+
+	struct IBV_DEALLOC_PD_REQ req;
+	req.pd_handle = pd->handle;
+
+	struct IBV_DEALLOC_PD_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DEALLOC_PD, &req, &rsp, &rsp_size);
+
+	free(pd);
+	return 0;
 }
 
 #undef ibv_reg_mr
@@ -302,20 +349,81 @@ LATEST_SYMVER_FUNC(ibv_reg_mr, 1_1, "IBVERBS_1.1",
 		   struct ibv_pd *pd, void *addr,
 		   size_t length, int access)
 {
-	struct ibv_mr *mr;
+	struct ibv_mr *mr = calloc(1, sizeof(struct ibv_mr));
+	struct mr_shm *p;
+	
+	if (PRINT_LOG) {
+		printf("#### ibv_cmd_reg_mr ####\n");
+		fflush(stdout);
+	}
 
-	if (ibv_dontfork_range(addr, length))
-		return NULL;
+	struct IBV_REG_MR_REQ req_body;
+	req_body.pd_handle = pd->handle;
+	req_body.mem_size = length;
+	req_body.access_flags = access;
+	req_body.shm_name[0] = '\0';
+	struct IBV_REG_MR_RSP rsp;
+	int rsp_size;
+	request_router(IBV_REG_MR, &req_body, &rsp, &rsp_size);
 
-	mr = get_ops(pd->context)->reg_mr(pd, addr, length, (uintptr_t) addr,
-					  access);
-	if (mr) {
-		mr->context = pd->context;
-		mr->pd      = pd;
-		mr->addr    = addr;
-		mr->length  = length;
-	} else
-		ibv_dofork_range(addr, length);
+	mr->handle  = rsp.handle;
+	mr->lkey    = rsp.lkey;
+	mr->rkey    = rsp.rkey;
+	strcpy(mr->shm_name, rsp.shm_name);
+
+	// FreeFlow: mounting shared memory from router.
+	mr->shm_fd = shm_open(mr->shm_name, O_CREAT | O_RDWR, 0666);
+	if (ftruncate(mr->shm_fd, length)) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+
+	char *membuff = (char *)malloc(length);
+	memcpy(membuff, addr, length);
+
+	int is_align = (long)addr % (4 * 1024) == 0 ? 1 : 0;
+	if (is_align)
+		mr->shm_ptr = mmap(addr, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED | MAP_LOCKED, mr->shm_fd, 0); 
+	else
+		mr->shm_ptr = mmap(0, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, mr->shm_fd, 0); 
+
+	if (mr->shm_ptr == MAP_FAILED){
+		printf("mmap failed in reg mr.\n");
+		fflush(stdout);
+	} else {
+		memcpy(mr->shm_ptr, membuff, length);
+		if (PRINT_LOG) {
+			printf("mmap succeed in reg mr.\n");
+		}
+
+		// struct IBV_REG_MR_MAPPING_REQ new_req_body;
+		// new_req_body.key = mr->lkey;
+		// new_req_body.mr_ptr = addr;
+		// new_req_body.shm_ptr = mr->shm_ptr;
+
+		// struct IBV_REG_MR_MAPPING_RSP new_rsp;
+		// request_router(IBV_REG_MR_MAPPING, &new_req_body, &new_rsp, &rsp_size);
+
+		p = (struct mr_shm*)mempool_insert(map_lkey_to_mrshm, mr->lkey);
+		p->mr = addr;
+		p->shm_ptr = mr->shm_ptr;
+
+		if (PRINT_LOG) {
+			printf("@@@@@@@@ lkey=%x, addr=%p, shm_prt=%p\n", mr->lkey, addr, mr->shm_ptr);
+			fflush(stdout);
+		}
+
+		/*
+		hashmap_put(map_lkey_to_shm_ptr, key, (void*)(mr->shm_ptr));
+		fflush(stdout);
+		*/	
+	}
+
+	mr->context = pd->context;
+	mr->pd = pd;
+	mr->addr = addr;
+	mr->length = length;
+	free(membuff);
 
 	return mr;
 }
@@ -421,16 +529,22 @@ LATEST_SYMVER_FUNC(ibv_dereg_mr, 1_1, "IBVERBS_1.1",
 		   int,
 		   struct ibv_mr *mr)
 {
-	int ret;
-	void *addr		= mr->addr;
-	size_t length		= mr->length;
-	enum ibv_mr_type type	= verbs_get_mr(mr)->mr_type;
+	if (PRINT_LOG) {
+		printf("#### ibv_dereg_mr ####\n");
+		fflush(stdout);	
+	}
 
-	ret = get_ops(mr->context)->dereg_mr(verbs_get_mr(mr));
-	if (!ret && type == IBV_MR_TYPE_MR)
-		ibv_dofork_range(addr, length);
+	struct IBV_DEREG_MR_REQ req_body;
+	req_body.handle = mr->handle;
+	
+	struct IBV_DEREG_MR_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DEREG_MR, &req_body, &rsp, &rsp_size);	
 
-	return ret;
+	shm_unlink(mr->shm_name);
+	mempool_del(map_lkey_to_mrshm, mr->lkey);
+
+	return rsp.ret;
 }
 
 struct ibv_comp_channel *ibv_create_comp_channel(struct ibv_context *context)
@@ -485,12 +599,47 @@ LATEST_SYMVER_FUNC(ibv_create_cq, 1_1, "IBVERBS_1.1",
 		   struct ibv_context *context, int cqe, void *cq_context,
 		   struct ibv_comp_channel *channel, int comp_vector)
 {
-	struct ibv_cq *cq;
+	struct ibv_cq *cq = calloc(1, sizeof(struct ibv_cq));
 
-	cq = get_ops(context)->create_cq(context, cqe, channel, comp_vector);
+	if (PRINT_LOG) {
+		printf("#### ibv_create_cq ####\n");
+		fflush(stdout);
+	}
 
-	if (cq)
-		verbs_init_cq(cq, context, channel, cq_context);
+	struct IBV_CREATE_CQ_REQ req_body;
+	req_body.channel_fd = channel ? comp_channel_map[channel->fd] : -1;
+	req_body.comp_vector = comp_vector;
+	req_body.cqe = cqe;
+	struct IBV_CREATE_CQ_RSP rsp;
+	int rsp_size;
+	request_router(IBV_CREATE_CQ, &req_body, &rsp, &rsp_size);
+
+	if (PRINT_LOG) {
+		printf("CQ return from router: cqe=%d handle = %d\n", rsp.cqe, rsp.handle);
+	}
+	
+	cq->handle  = rsp.handle;
+	cq->cqe     = rsp.cqe;
+	verbs_init_cq(cq, context, channel, cq_context);
+
+	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
+	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
+	cq_shm_map[cq->handle] = (struct CtrlShmPiece *)shm_p;
+	pthread_mutex_init(&(cq_shm_mtx_map[cq->handle]), NULL);
+
+	if (cqe > WR_QUEUE_SIZE) {
+		printf("Freeflow WARNING: attempt to create a very large CQ. This may cause problems.\n");
+	}
+	map_cq_to_wr_queue[cq->handle] = (struct wr_queue*)malloc(sizeof(struct wr_queue));
+	map_cq_to_wr_queue[cq->handle]->queue = (struct wr*)malloc(sizeof(struct wr) * WR_QUEUE_SIZE);
+	map_cq_to_wr_queue[cq->handle]->head = 0;
+	map_cq_to_wr_queue[cq->handle]->tail = 0;
+	pthread_spin_init(&(map_cq_to_wr_queue[cq->handle]->head_lock), PTHREAD_PROCESS_PRIVATE);
+	pthread_spin_init(&(map_cq_to_wr_queue[cq->handle]->tail_lock), PTHREAD_PROCESS_PRIVATE);
 
 	return cq;
 }
@@ -506,20 +655,28 @@ LATEST_SYMVER_FUNC(ibv_destroy_cq, 1_1, "IBVERBS_1.1",
 		   int,
 		   struct ibv_cq *cq)
 {
+	if (PRINT_LOG) {
+		printf("#### ibv_destroy_cq ####\n");
+		fflush(stdout);
+	}
+
+	struct IBV_DESTROY_CQ_REQ req_body;
+	req_body.cq_handle = cq->handle;
+	
+	struct IBV_DESTROY_CQ_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DESTROY_CQ, &req_body, &rsp, &rsp_size);
+
 	struct ibv_comp_channel *channel = cq->channel;
-	int ret;
-
-	ret = get_ops(cq->context)->destroy_cq(cq);
-
 	if (channel) {
-		if (!ret) {
+		if (!rsp.ret) {
 			pthread_mutex_lock(&channel->context->mutex);
 			--channel->refcnt;
 			pthread_mutex_unlock(&channel->context->mutex);
 		}
 	}
 
-	return ret;
+	return rsp.ret;
 }
 
 LATEST_SYMVER_FUNC(ibv_get_cq_event, 1_1, "IBVERBS_1.1",
@@ -598,20 +755,80 @@ LATEST_SYMVER_FUNC(ibv_create_qp, 1_1, "IBVERBS_1.1",
 		   struct ibv_pd *pd,
 		   struct ibv_qp_init_attr *qp_init_attr)
 {
-	struct ibv_qp *qp = get_ops(pd->context)->create_qp(pd, qp_init_attr);
+	struct ibv_qp *qp = calloc(1, sizeof(struct ibv_qp));
 
-	if (qp) {
-		qp->context    	     = pd->context;
-		qp->qp_context 	     = qp_init_attr->qp_context;
-		qp->pd         	     = pd;
-		qp->send_cq    	     = qp_init_attr->send_cq;
-		qp->recv_cq    	     = qp_init_attr->recv_cq;
-		qp->srq        	     = qp_init_attr->srq;
-		qp->qp_type          = qp_init_attr->qp_type;
-		qp->state	     = IBV_QPS_RESET;
-		qp->events_completed = 0;
-		pthread_mutex_init(&qp->mutex, NULL);
-		pthread_cond_init(&qp->cond, NULL);
+	if (PRINT_LOG) {
+		printf("#### ibv_create_qp ####\n");
+		fflush(stdout);
+	}
+
+	struct IBV_CREATE_QP_REQ req_body;
+	req_body.pd_handle	= pd->handle;
+	req_body.qp_type	= qp_init_attr->qp_type;
+	req_body.sq_sig_all	= qp_init_attr->sq_sig_all;
+	req_body.send_cq_handle	= qp_init_attr->send_cq->handle;
+	req_body.recv_cq_handle	= qp_init_attr->recv_cq->handle;
+	req_body.srq_handle	= qp_init_attr->srq ? qp_init_attr->srq->handle : 0;
+	req_body.cap.max_recv_sge    = qp_init_attr->cap.max_recv_sge;
+	req_body.cap.max_send_sge    = qp_init_attr->cap.max_send_sge;
+	req_body.cap.max_recv_wr     = qp_init_attr->cap.max_recv_wr;
+	req_body.cap.max_send_wr     = qp_init_attr->cap.max_send_wr;
+	req_body.cap.max_inline_data = qp_init_attr->cap.max_inline_data;
+	struct IBV_CREATE_QP_RSP rsp;
+	int rsp_size;
+	request_router(IBV_CREATE_QP, &req_body, &rsp, &rsp_size);
+
+	qp->handle	= rsp.handle;
+	qp->qp_num	= rsp.qp_num;
+	qp_init_attr->cap.max_recv_sge	= rsp.cap.max_recv_sge;
+	qp_init_attr->cap.max_send_sge	= rsp.cap.max_send_sge;
+	qp_init_attr->cap.max_recv_wr	= rsp.cap.max_recv_wr;
+	qp_init_attr->cap.max_send_wr	= rsp.cap.max_send_wr;
+	qp_init_attr->cap.max_inline_data = rsp.cap.max_inline_data;
+
+	qp->context			= pd->context;
+	qp->qp_context		= qp_init_attr->qp_context;
+	qp->pd				= pd;
+	qp->send_cq			= qp_init_attr->send_cq;
+	qp->recv_cq			= qp_init_attr->recv_cq;
+	qp->srq				= qp_init_attr->srq;
+	qp->qp_type			= qp_init_attr->qp_type;
+	qp->state			= IBV_QPS_RESET;
+	qp->events_completed = 0;
+	pthread_mutex_init(&qp->mutex, NULL);
+	pthread_cond_init(&qp->cond, NULL);
+
+	// Patch SRQ
+	// if (qp->srq) {
+	// 	map_cq_to_srq[qp->recv_cq->handle] = qp->srq->handle;
+	// }
+	// else {
+	// 	map_cq_to_srq[qp->recv_cq->handle] = MAP_SIZE + 1;
+	// }
+
+	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
+	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
+	if (!shm_p) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	} else {
+		printf("[INFO] Succeed to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+
+	qp_shm_map[qp->handle] = (struct CtrlShmPiece *)shm_p;
+	pthread_mutex_init(&(qp_shm_mtx_map[qp->handle]), NULL); 
+
+	if (PRINT_LOG) {
+		printf("#### ibv_create_qp over ####\n");
+		printf("init_attr.qp_type = %d\n", qp_init_attr->qp_type);
+		printf("qp->handle = %d\n", qp->handle);
+		printf("qp->qp_num = %d\n", qp->qp_num);
+		fflush(stdout);
 	}
 
 	return qp;
@@ -649,23 +866,40 @@ LATEST_SYMVER_FUNC(ibv_modify_qp, 1_1, "IBVERBS_1.1",
 		   struct ibv_qp *qp, struct ibv_qp_attr *attr,
 		   int attr_mask)
 {
-	int ret;
+	struct IBV_MODIFY_QP_REQ req_body;
+	memcpy(&req_body.attr, attr, sizeof(struct ibv_qp_attr));
+	req_body.attr_mask = attr_mask;
+	req_body.handle = qp->handle;
 
-	ret = get_ops(qp->context)->modify_qp(qp, attr, attr_mask);
-	if (ret)
-		return ret;
+	struct IBV_MODIFY_QP_RSP rsp;
+	int rsp_size;
+	request_router(IBV_MODIFY_QP, &req_body, &rsp, &rsp_size);
 
 	if (attr_mask & IBV_QP_STATE)
 		qp->state = attr->qp_state;
 
-	return 0;
+	return rsp.ret;
 }
 
 LATEST_SYMVER_FUNC(ibv_destroy_qp, 1_1, "IBVERBS_1.1",
 		   int,
 		   struct ibv_qp *qp)
 {
-	return get_ops(qp->context)->destroy_qp(qp);
+	if (PRINT_LOG) {
+		printf("#### ibv_destroy_qp ####\n");
+		fflush(stdout);
+	}
+
+	struct IBV_DESTROY_QP_REQ req_body;
+	req_body.qp_handle = qp->handle;
+	
+	struct IBV_DESTROY_QP_RSP rsp;
+	int rsp_size;
+	request_router(IBV_DESTROY_QP, &req_body, &rsp, &rsp_size);	
+
+	// TODO: clean up mempool
+
+	return rsp.ret;
 }
 
 LATEST_SYMVER_FUNC(ibv_create_ah, 1_1, "IBVERBS_1.1",
@@ -1079,4 +1313,360 @@ free_resources:
 	neigh_free_resources(&neigh_handler);
 
 	return ret;
+}
+
+LATEST_SYMVER_FUNC(ibv_post_send, 1_1, "IBVERBS_1.1",
+			int,
+		   	struct ibv_qp *qp, struct ibv_send_wr *wr,
+			struct ibv_send_wr **bad_wr)
+{
+	struct ibv_send_wr	*i;
+	struct ibv_send_wr	*n, *tmp = NULL;
+	struct ibv_sge		*s;
+	uint32_t			*ah;
+	uint32_t			wr_count = 0, sge_count = 0, ah_count = 0;
+
+    struct CtrlShmPiece			*csp = qp_shm_map[qp->handle];
+    pthread_mutex_t				*csp_mtx = &(qp_shm_mtx_map[qp->handle]);
+	struct FfrRequestHeader		*header = (struct FfrRequestHeader*)(csp->req);
+	struct ib_uverbs_post_send	*cmd = (struct ib_uverbs_post_send*)(csp->req + sizeof(struct FfrRequestHeader));
+	struct IBV_POST_SEND_RSP	*rsp = (struct IBV_POST_SEND_RSP*)(csp->rsp + sizeof(struct FfrResponseHeader));
+	
+
+    if (PRINT_LOG) {
+    	printf("#### ibv_post_send ####\n");
+		fflush(stdout);
+    }
+
+	for (i = wr; i; i = i->next) {
+		wr_count++;
+		sge_count += i->num_sge;
+	}
+
+	if (qp->qp_type == IBV_QPT_UD) {
+		ah_count = wr_count;
+	}
+
+	// Entering critical section
+	pthread_mutex_lock(csp_mtx);
+
+	header->client_id = ffr_client_id;
+	header->func = IBV_POST_SEND;
+	header->body_size = sizeof *cmd + wr_count * sizeof *n + sge_count * sizeof *s + ah_count * sizeof(uint32_t);
+
+	//IBV_INIT_CMD_RESP(cmd, req_body.wr_size, POST_SEND, &resp, sizeof resp);
+	cmd->qp_handle = qp->handle;
+	cmd->wr_count  = wr_count;
+	cmd->sge_count = sge_count;
+
+	n = (struct ibv_send_wr *) ((void *) cmd + sizeof *cmd);
+	s = (struct ibv_sge *) (n + wr_count);
+	ah = (uint32_t*) (s + sge_count);
+
+	tmp = n;
+	for (i = wr; i; i = i->next) {
+		memcpy(tmp, i, sizeof(struct ibv_send_wr));
+		if (qp->qp_type == IBV_QPT_UD) {
+			*ah = i->wr.ud.ah->handle;
+			ah = ah + 1;
+		}
+
+		if (tmp->num_sge) {
+			/* freeflow copy data */
+			memcpy(s, i->sg_list, tmp->num_sge * sizeof *s);
+			// 对齐地址
+			for (int j = 0; j < tmp->num_sge; j++) {
+				struct mr_shm *p = (struct mr_shm*)mempool_get(map_lkey_to_mrshm, s[j].lkey);
+				char *mr = p->mr;
+				char *shm = p->shm_ptr;
+
+				char *addr = (char*)(s[j].addr);
+				if (shm != mr) {
+					memcpy(shm + (addr - mr), addr, s[j].length);	
+				}
+				s[j].addr = addr - mr;
+
+				if (PRINT_LOG) {
+					printf("!!!!!!!!!! length=%u,addr=%lu,lkey=%u,mr_ptr=%lu,shm_ptr=%lu,original_addr=%lu\n", s[j].length, s[j].addr, s[j].lkey, (uint64_t)mr, (uint64_t)shm, (uint64_t)addr);
+					fflush(stdout);
+					printf("wr=%lu, sge=%lu, sizeof send_wr=%lu\n", (uint64_t)n, (uint64_t)s, sizeof(*n));
+					fflush(stdout);
+				}
+			}
+			s += tmp->num_sge;
+		}
+		tmp++;
+	}
+
+	struct IBV_POST_SEND_REQ req_body;
+	req_body.wr_size = header->body_size;
+	req_body.wr = (char*)cmd;
+	int rsp_size;
+	request_router(IBV_POST_SEND, &req_body, rsp, &rsp_size);
+ 
+	wr_count = rsp->bad_wr;
+	if (wr_count) {
+		i = wr;
+		while (--wr_count)
+			i = i->next;
+		*bad_wr = i;
+	} else if (rsp->ret_errno) {
+		*bad_wr = wr;
+	}
+	
+	// wmb();
+	csp->state = IDLE;
+	pthread_mutex_unlock(csp_mtx);
+
+	return rsp->ret_errno;
+}
+
+LATEST_SYMVER_FUNC(ibv_post_recv, 1_1, "IBVERBS_1.1",
+			int,
+			struct ibv_qp *qp, struct ibv_recv_wr *wr,
+			struct ibv_recv_wr **bad_wr)
+{
+	struct ibv_recv_wr		*i;
+	struct ibv_recv_wr		*n = NULL, *tmp = NULL;
+	struct ibv_sge			*s;
+	uint32_t				wr_count = 0, sge_count = 0;
+	int						wr_index;
+	struct wr				*wr_p;
+	struct sge_record		*sge_p;
+	struct wr_queue			*wr_queue;
+
+	struct CtrlShmPiece		*csp = qp_shm_map[qp->handle];
+	pthread_mutex_t			*csp_mtx = &(qp_shm_mtx_map[qp->handle]);
+	struct FfrRequestHeader	*header = (struct FfrRequestHeader*)(csp->req);
+	struct ib_uverbs_post_recv	*cmd = (struct ib_uverbs_post_recv*)(csp->req + sizeof(struct FfrRequestHeader));
+	struct IBV_POST_RECV_RSP	*rsp = (struct IBV_POST_RECV_RSP*)(csp->rsp + sizeof(struct FfrResponseHeader));
+
+	if (PRINT_LOG) {
+		printf("#### ibv_post_receive ####\n");
+		fflush(stdout);
+	}
+
+	for (i = wr; i; i = i->next) {
+		wr_count++;
+		sge_count += i->num_sge;
+	}
+
+	// Entering critical section
+	pthread_mutex_lock(csp_mtx);
+
+	header->client_id = ffr_client_id;
+	header->func = IBV_POST_RECV;
+	header->body_size = sizeof *cmd + wr_count * sizeof *n + sge_count * sizeof *s;
+
+	// IBV_INIT_CMD_RESP(cmd, req_body.wr_size, POST_RECV, &resp, sizeof resp);
+	cmd->qp_handle = qp->handle;
+	cmd->wr_count  = wr_count;
+	cmd->sge_count = sge_count;
+
+	n = (struct ibv_recv_wr *) ((void *) cmd + sizeof *cmd);
+	s = (struct ibv_sge *) (n + wr_count);
+
+	wr_queue = map_cq_to_wr_queue[qp->recv_cq->handle];
+
+	tmp = n;
+	for (i = wr; i; i = i->next) {
+		memcpy(tmp, i, sizeof(struct ibv_recv_wr));
+
+		// We are already in critical section
+		//pthread_spin_lock(&(wr_queue->head_lock));
+		wr_index = wr_queue->head;
+		wr_queue->head++;
+		if (wr_queue->head >= WR_QUEUE_SIZE) {
+			wr_queue->head = 0;
+		}
+		//pthread_spin_unlock(&(wr_queue->head_lock));
+
+		wr_p = wr_queue->queue + wr_index;
+		wr_p->sge_num = tmp->num_sge;
+		printf("ibv_post_recv: wr_p->sge_num = %d\n", tmp->num_sge);
+
+		if (tmp->num_sge) {
+			wr_p->sge_queue = malloc(sizeof(struct sge_record) * tmp->num_sge);
+			sge_p = wr_p->sge_queue;
+
+			/* freeflow keeps track of offsets */
+			tmp->sg_list = s;
+			memcpy(s, i->sg_list, tmp->num_sge * sizeof *s);
+
+			for (int j = 0; j < tmp->num_sge; j++) {
+				struct mr_shm *p = (struct mr_shm*)mempool_get(map_lkey_to_mrshm, s[j].lkey);
+				char *mr = p->mr;
+				
+				char *addr = (char*)(s[j].addr);
+				s[j].addr = addr - mr;
+
+				sge_p->length = s[j].length;
+				sge_p->mr_addr = addr;
+				sge_p->shm_addr = p->shm_ptr + s[j].addr;
+				sge_p++;
+			}
+			s += tmp->num_sge;
+		}
+		tmp++;
+	}
+
+	struct IBV_POST_RECV_REQ req_body;
+	req_body.wr_size = header->body_size;
+	req_body.wr = (char*)cmd;
+	int rsp_size;
+	request_router(IBV_POST_RECV, &req_body, rsp, &rsp_size);
+
+	wr_count = rsp->bad_wr;
+	if (wr_count) {
+		i = wr;
+		while (--wr_count)
+			i = i->next;
+		*bad_wr = i;
+	} else if (rsp->ret_errno) {
+		*bad_wr = wr;
+	}
+
+	// wmb();
+	csp->state = IDLE;
+	pthread_mutex_unlock(csp_mtx);
+
+	return rsp->ret_errno;
+}
+
+LATEST_SYMVER_FUNC(ibv_poll_cq, 1_1, "IBVERBS_1.1",
+			int,
+			struct ibv_cq *cq, int num_entries, struct ibv_wc *wc)
+{
+	int					i, j, wr_index;
+	struct sge_record	*s;
+	struct wr_queue		*wr_queue;
+	struct wr			*wr_p;
+
+	struct CtrlShmPiece			*csp = cq_shm_map[cq->handle];
+	pthread_mutex_t				*csp_mtx = &(cq_shm_mtx_map[cq->handle]);
+	struct FfrRequestHeader		*req_header = (struct FfrRequestHeader*)(csp->req);
+	struct IBV_POLL_CQ_REQ		*req = (struct IBV_POLL_CQ_REQ*)(csp->req + sizeof(struct FfrRequestHeader));
+	struct FfrResponseHeader	*rsp_header = (struct FfrResponseHeader*)csp->rsp;
+	struct ibv_wc				*wc_list = (struct ibv_wc*)(csp->rsp + sizeof(struct FfrResponseHeader));
+
+	// if (PRINT_LOG) {
+	// 	printf("#### ibv_poll_cq ####\n");
+	// 	fflush(stdout);
+	// }
+
+	pthread_mutex_lock(csp_mtx);
+
+	req_header->client_id = ffr_client_id;
+	req_header->func = IBV_POLL_CQ;
+	req_header->body_size = sizeof(struct IBV_POLL_CQ_REQ);
+
+	req->cq_handle = cq->handle;
+	req->ne = num_entries;
+
+	// patch SRQ
+	// if (map_cq_to_srq[cq->handle] <= MAP_SIZE) {
+	// 	pthread_spin_lock(&(map_srq_to_wr_queue[map_cq_to_srq[cq->handle]]->tail_lock));
+	// }
+
+	request_router(IBV_POLL_CQ, req, wc_list, &rsp_header->rsp_size);
+
+	if (rsp_header->rsp_size % sizeof(struct ibv_wc) != 0) {
+		printf("[Error] The rsp size is %d while the unit ibn_wc size is %d.", rsp_header->rsp_size, (int)sizeof(struct ibv_wc));
+		fflush(stdout);
+		pthread_mutex_unlock(csp_mtx);
+		return -1;
+	}
+
+	int count = rsp_header->rsp_size / sizeof(struct ibv_wc);
+
+	// if (PRINT_LOG) {
+	// 	printf("count = %d, rsp_size = %d, sizeof struct ibv_wc=%d\n", count, rsp_header->rsp_size, (int)sizeof(struct ibv_wc));
+	// 	fflush(stdout);
+	// }
+
+	memcpy((char*)wc, (char const *)wc_list, rsp_header->rsp_size);
+
+	/*
+	for (i = 0; i < count; i++) {
+		wc[i].wr_id = wc_list[i].wr_id;
+		wc[i].status = wc_list[i].status;
+		wc[i].opcode = wc_list[i].opcode;
+		wc[i].vendor_err = wc_list[i].vendor_err;
+		wc[i].byte_len = wc_list[i].byte_len;
+		wc[i].imm_data = wc_list[i].imm_data;
+		wc[i].qp_num = wc_list[i].qp_num;
+		wc[i].src_qp = wc_list[i].src_qp;
+		wc[i].wc_flags = wc_list[i].wc_flags;
+		wc[i].pkey_index = wc_list[i].pkey_index;
+		wc[i].slid = wc_list[i].slid;
+		wc[i].sl = wc_list[i].sl;
+		wc[i].dlid_path_bits = wc_list[i].dlid_path_bits;
+	}
+	*/
+
+	if (PRINT_LOG)
+	{
+		for (i = 0; i < count; i++) {
+			printf("=================================\n");
+			printf("wc_list[%d].wr_id=%lu\n", i, (unsigned long)wc_list[i].wr_id);
+			printf("wc_list[%d].status=%d\n", i, wc_list[i].status);
+			printf("wc_list[%d].opcode=%d\n", i, wc_list[i].opcode);
+			printf("wc_list[%d].vendor_err=%d\n", i, wc_list[i].vendor_err);
+			printf("wc_list[%d].byte_len=%d\n", i, wc_list[i].byte_len);
+			printf("wc_list[%d].imm_data=%u\n", i, wc_list[i].imm_data);
+			printf("wc_list[%d].qp_num=%d\n", i, wc_list[i].qp_num);
+			printf("wc_list[%d].src_qp=%d\n", i, wc_list[i].src_qp);
+			printf("wc_list[%d].wc_flags=%d\n", i, wc_list[i].wc_flags);
+			printf("wc_list[%d].pkey_index=%d\n", i, wc_list[i].pkey_index);
+			printf("wc_list[%d].slid=%d\n", i, wc_list[i].slid);
+			printf("wc_list[%d].sl=%d\n", i, wc_list[i].sl);
+			printf("wc_list[%d].ldid_path_bits=%d\n", i, wc_list[i].dlid_path_bits);
+			fflush(stdout);
+		}
+	}
+
+	/* Copying shared memory here if it is a receve queue. */
+	for (i = 0; i < count; i++) {
+		if ((wc_list[i].opcode) & IBV_WC_RECV) {			
+			// if (map_cq_to_srq[cq->handle] > MAP_SIZE) {
+				wr_queue = map_cq_to_wr_queue[cq->handle];
+			// }
+			// else {
+			// 	wr_queue = map_srq_to_wr_queue[map_cq_to_srq[cq->handle]];
+			// }
+
+			// we are already in critical section
+			// pthread_spin_lock(&(wr_queue->tail_lock));
+			wr_index = wr_queue->tail;
+			wr_queue->tail++;
+			if (wr_queue->tail >= WR_QUEUE_SIZE) {
+				wr_queue->tail = 0;
+			}
+			// pthread_spin_unlock(&(wr_queue->tail_lock));
+
+			wr_p = wr_queue->queue + wr_index;
+
+			/* freeflow retrieve addresses */
+			if (wr_p->sge_num) {
+				s = (struct sge_record*)(wr_p->sge_queue);
+				for (j = 0; j < wr_p->sge_num; j++) {
+					if (s->mr_addr != s->shm_addr) {
+						memcpy(s->mr_addr, s->shm_addr, s->length);	
+					}
+					s++;
+				}
+				free(wr_p->sge_queue);
+			}
+		}
+	}
+
+	// wmb();
+	csp->state = IDLE;
+	// patch SRQ
+	// if (map_cq_to_srq[cq->handle] <= MAP_SIZE) {
+	// 	pthread_spin_unlock(&(map_srq_to_wr_queue[map_cq_to_srq[cq->handle]]->tail_lock));
+	// }
+	pthread_mutex_unlock(csp_mtx);
+
+	return count;
 }

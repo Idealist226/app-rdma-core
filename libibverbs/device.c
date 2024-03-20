@@ -47,6 +47,7 @@
 #include <util/symver.h>
 #include <util/util.h>
 #include "ibverbs.h"
+#include "freeflow.h"
 
 static pthread_mutex_t dev_list_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct list_head device_list = LIST_HEAD_INIT(device_list);
@@ -364,7 +365,23 @@ LATEST_SYMVER_FUNC(ibv_open_device, 1_1, "IBVERBS_1.1",
 		   struct ibv_context *,
 		   struct ibv_device *device)
 {
-	return verbs_open_device(device, NULL);
+	init_sock();
+
+	if (PRINT_LOG) {
+		printf("#### ibv_open_device ####\n");
+		fflush(stdout);
+	}
+	struct ibv_context *context = calloc(1, sizeof(struct ibv_context));
+	struct IBV_GET_CONTEXT_RSP rsp;
+	int rsp_size;
+	request_router(IBV_GET_CONTEXT, NULL, &rsp, &rsp_size);
+	
+	context->async_fd = rsp.async_fd;
+	context->num_comp_vectors = rsp.num_comp_vectors;
+	context->device = device;
+	pthread_mutex_init(&context->mutex, NULL);
+
+	return context;
 }
 
 void verbs_uninit_context(struct verbs_context *context_ex)
@@ -379,9 +396,9 @@ LATEST_SYMVER_FUNC(ibv_close_device, 1_1, "IBVERBS_1.1",
 		   int,
 		   struct ibv_context *context)
 {
-	const struct verbs_context_ops *ops = get_ops(context);
+	// const struct verbs_context_ops *ops = get_ops(context);
 
-	ops->free_context(context);
+	// ops->free_context(context);
 	return 0;
 }
 

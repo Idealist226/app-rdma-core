@@ -1,0 +1,18 @@
+{
+    "files.associations": {
+        "cmd_write.h": "c",
+        "verbs.h": "c",
+        "freeflow-types.h": "c",
+        "ibverbs.h": "c",
+        "freeflow.h": "c",
+        "arch.h": "c",
+        "minmax.h": "c",
+        "pthread.h": "c",
+        "ib_user_ioctl_cmds.h": "c",
+        "neigh.h": "c",
+        "util.h": "c",
+        "wqe.h": "c",
+        "opcode.h": "c",
+        "mmio.h": "c"
+    }
+}

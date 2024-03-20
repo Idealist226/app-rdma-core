@@ -636,6 +636,10 @@ struct ibv_mr {
 	uint32_t		handle;
 	uint32_t		lkey;
 	uint32_t		rkey;
+
+	char shm_name[100];
+	void *shm_ptr;
+	int shm_fd;
 };
 
 enum ibv_mw_type {
@@ -1231,6 +1235,10 @@ struct ibv_qp {
 	pthread_mutex_t		mutex;
 	pthread_cond_t		cond;
 	uint32_t		events_completed;
+
+	char shm_name[100];
+	void *shm_ptr;
+	int shm_fd;
 };
 
 struct ibv_qp_ex {
@@ -2728,10 +2736,10 @@ void ibv_ack_cq_events(struct ibv_cq *cq, unsigned int nevents);
  * non-negative and strictly less than num_entries, then the CQ was
  * emptied.
  */
-static inline int ibv_poll_cq(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc)
-{
-	return cq->context->ops.poll_cq(cq, num_entries, wc);
-}
+int ibv_poll_cq(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc);
+// {
+// 	return cq->context->ops.poll_cq(cq, num_entries, wc);
+// }
 
 /**
  * ibv_req_notify_cq - Request completion notification on a CQ.  An
@@ -3037,6 +3045,11 @@ int ibv_query_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
  */
 int ibv_destroy_qp(struct ibv_qp *qp);
 
+int ibv_restore_qp(struct ibv_qp *qp,
+			struct ibv_pd *pd,
+			struct ibv_qp_init_attr *qp_init_attr,
+			struct ibv_qp_attr *attr);
+
 /*
  * ibv_create_wq - Creates a WQ associated with the specified protection
  * domain.
@@ -3163,20 +3176,20 @@ static inline int ibv_destroy_rwq_ind_table(struct ibv_rwq_ind_table *rwq_ind_ta
  * If IBV_SEND_INLINE flag is set, the data buffers can be reused
  * immediately after the call returns.
  */
-static inline int ibv_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
-				struct ibv_send_wr **bad_wr)
-{
-	return qp->context->ops.post_send(qp, wr, bad_wr);
-}
+int ibv_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
+				struct ibv_send_wr **bad_wr);
+// {
+// 	return _ibv_post_send(qp, wr, bad_wr);
+// }
 
 /**
  * ibv_post_recv - Post a list of work requests to a receive queue.
  */
-static inline int ibv_post_recv(struct ibv_qp *qp, struct ibv_recv_wr *wr,
-				struct ibv_recv_wr **bad_wr)
-{
-	return qp->context->ops.post_recv(qp, wr, bad_wr);
-}
+int ibv_post_recv(struct ibv_qp *qp, struct ibv_recv_wr *wr,
+				struct ibv_recv_wr **bad_wr);
+// {
+// 	return qp->context->ops.post_recv(qp, wr, bad_wr);
+// }
 
 /**
  * ibv_create_ah - Create an address handle.

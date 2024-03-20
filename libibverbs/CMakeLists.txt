@@ -43,6 +43,7 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   dummy_ops.c
   dynamic_driver.c
   enum_strs.c
+  freeflow.c
   ibdev_nl.c
   init.c
   marshall.c
@@ -57,6 +58,8 @@ target_link_libraries(ibverbs LINK_PRIVATE
   ${CMAKE_THREAD_LIBS_INIT}
   ${CMAKE_DL_LIBS}
   kern-abi
+  -lrt
+  -lmempool
   )
 
 function(ibverbs_finalize)
