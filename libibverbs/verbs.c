@@ -210,6 +210,16 @@ struct _compat_ibv_port_attr {
 	uint8_t flags;
 };
 
+static void releaseShm(void *addr, size_t length, int fd)
+{
+	if (munmap(addr, length) == -1)
+		printf("munmap: Error unmap %p\n", addr);
+	if (close(fd) == -1)
+		printf("munmap: Error close %d\n", fd);
+	// if (shm_unlink(shm_name) == -1)
+	// 	printf("shm_unlink: Error removing %s\n", shm_name);
+}
+
 LATEST_SYMVER_FUNC(ibv_query_port, 1_1, "IBVERBS_1.1",
 		   int,
 		   struct ibv_context *context, uint8_t port_num,
@@ -353,7 +363,7 @@ LATEST_SYMVER_FUNC(ibv_reg_mr, 1_1, "IBVERBS_1.1",
 	struct mr_shm *p;
 	
 	if (PRINT_LOG) {
-		printf("#### ibv_cmd_reg_mr ####\n");
+		printf("#### ibv_reg_mr ####\n");
 		fflush(stdout);
 	}
 
@@ -807,11 +817,13 @@ LATEST_SYMVER_FUNC(ibv_create_qp, 1_1, "IBVERBS_1.1",
 	// }
 
 	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
+	qp->shm_fd = fd;
 	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
 		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
 		fflush(stdout);
 	}
 	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
+	qp->shm_ptr = shm_p;
 	if (!shm_p) {
 		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
 		fflush(stdout);
@@ -898,6 +910,9 @@ LATEST_SYMVER_FUNC(ibv_destroy_qp, 1_1, "IBVERBS_1.1",
 	request_router(IBV_DESTROY_QP, &req_body, &rsp, &rsp_size);	
 
 	// TODO: clean up mempool
+	releaseShm(qp->shm_ptr, sizeof(struct CtrlShmPiece), qp->shm_fd);
+	qp_shm_map[qp->handle] = NULL;
+	pthread_mutex_destroy(&(qp_shm_mtx_map[qp->handle]));
 
 	return rsp.ret;
 }
@@ -1669,4 +1684,54 @@ LATEST_SYMVER_FUNC(ibv_poll_cq, 1_1, "IBVERBS_1.1",
 	pthread_mutex_unlock(csp_mtx);
 
 	return count;
+}
+
+LATEST_SYMVER_FUNC(ibv_restore_qp, 1_1, "IBVERBS_1.1",
+			int,
+			struct ibv_qp *qp,
+			struct ibv_pd *pd,
+			struct ibv_qp_init_attr *qp_init_attr,
+			struct ibv_qp_attr *attr)
+{
+	if (PRINT_LOG) {
+		printf("#### ibv_restore_qp ####\n");
+		printf("ibv_restore_qp: qp->handle = %d\n", qp->handle);
+		printf("ibv_restore_qp: qp->num = %d\n", qp->qp_num);
+		fflush(stdout);
+	}
+
+	struct IBV_RESTORE_QP_REQ req_body;
+	req_body.pd_handle = pd->handle;
+	req_body.send_cq_handle = qp_init_attr->send_cq->handle;
+	req_body.recv_cq_handle = qp_init_attr->recv_cq->handle;
+	req_body.lid = attr->ah_attr.dlid;
+	req_body.qpn = attr->dest_qp_num;
+	req_body.gid = attr->ah_attr.grh.dgid;
+	req_body.qp_handle = qp->handle;
+
+	struct IBV_RESTORE_QP_RSP rsp;
+	int rsp_size;
+	request_router(IBV_RESTORE_QP, &req_body, &rsp, &rsp_size);
+
+	printf("ibv_restore_qp: shm_name = %s\n", rsp.shm_name);
+	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
+	qp->shm_fd = fd;
+	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
+	qp->shm_ptr = shm_p;
+	if (!shm_p) {
+		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	} else {
+		printf("[INFO] Succeed to mount shm %s\n", rsp.shm_name);
+		fflush(stdout);
+	}
+
+	qp_shm_map[qp->handle] = (struct CtrlShmPiece *)shm_p;
+	pthread_mutex_init(&(qp_shm_mtx_map[qp->handle]), NULL);
+
+	return 0;
 }
