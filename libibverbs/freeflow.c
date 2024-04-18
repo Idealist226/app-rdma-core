@@ -333,10 +333,10 @@ void request_router(RDMA_FUNCTION_CALL req, void* req_body, void *rsp, int *rsp_
 		header.body_size = sizeof(struct IBV_REG_MR_REQ);
 		break;
 
-	// case IBV_REG_MR_MAPPING:
-	// 	*rsp_size = sizeof(struct IBV_REG_MR_MAPPING_RSP);
-	// 	header.body_size = sizeof(struct IBV_REG_MR_MAPPING_REQ);
-	// 	break;
+	case IBV_REG_MR_MAPPING:
+		*rsp_size = sizeof(struct IBV_REG_MR_MAPPING_RSP);
+		header.body_size = sizeof(struct IBV_REG_MR_MAPPING_REQ);
+		break;
 
 	case IBV_DEREG_MR:
 		*rsp_size = sizeof(struct IBV_DEREG_MR_RSP);

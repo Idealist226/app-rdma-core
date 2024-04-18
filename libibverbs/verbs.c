@@ -406,13 +406,13 @@ LATEST_SYMVER_FUNC(ibv_reg_mr, 1_1, "IBVERBS_1.1",
 			printf("mmap succeed in reg mr.\n");
 		}
 
-		// struct IBV_REG_MR_MAPPING_REQ new_req_body;
-		// new_req_body.key = mr->lkey;
-		// new_req_body.mr_ptr = addr;
-		// new_req_body.shm_ptr = mr->shm_ptr;
+		struct IBV_REG_MR_MAPPING_REQ new_req_body;
+		new_req_body.key = mr->lkey;
+		new_req_body.mr_ptr = addr;
+		new_req_body.shm_ptr = mr->shm_ptr;
 
-		// struct IBV_REG_MR_MAPPING_RSP new_rsp;
-		// request_router(IBV_REG_MR_MAPPING, &new_req_body, &new_rsp, &rsp_size);
+		struct IBV_REG_MR_MAPPING_RSP new_rsp;
+		request_router(IBV_REG_MR_MAPPING, &new_req_body, &new_rsp, &rsp_size);
 
 		p = (struct mr_shm*)mempool_insert(map_lkey_to_mrshm, mr->lkey);
 		p->mr = addr;
