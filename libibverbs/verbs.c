@@ -371,6 +371,7 @@ LATEST_SYMVER_FUNC(ibv_reg_mr, 1_1, "IBVERBS_1.1",
 	req_body.pd_handle = pd->handle;
 	req_body.mem_size = length;
 	req_body.access_flags = access;
+	req_body.addr = addr;
 	req_body.shm_name[0] = '\0';
 	struct IBV_REG_MR_RSP rsp;
 	int rsp_size;
@@ -405,14 +406,6 @@ LATEST_SYMVER_FUNC(ibv_reg_mr, 1_1, "IBVERBS_1.1",
 		if (PRINT_LOG) {
 			printf("mmap succeed in reg mr.\n");
 		}
-
-		struct IBV_REG_MR_MAPPING_REQ new_req_body;
-		new_req_body.key = mr->lkey;
-		new_req_body.mr_ptr = addr;
-		new_req_body.shm_ptr = mr->shm_ptr;
-
-		struct IBV_REG_MR_MAPPING_RSP new_rsp;
-		request_router(IBV_REG_MR_MAPPING, &new_req_body, &new_rsp, &rsp_size);
 
 		p = (struct mr_shm*)mempool_insert(map_lkey_to_mrshm, mr->lkey);
 		p->mr = addr;
@@ -632,15 +625,6 @@ LATEST_SYMVER_FUNC(ibv_create_cq, 1_1, "IBVERBS_1.1",
 	cq->cqe     = rsp.cqe;
 	verbs_init_cq(cq, context, channel, cq_context);
 
-	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
-	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
-		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
-		fflush(stdout);
-	}
-	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
-	cq_shm_map[cq->handle] = (struct CtrlShmPiece *)shm_p;
-	pthread_mutex_init(&(cq_shm_mtx_map[cq->handle]), NULL);
-
 	if (cqe > WR_QUEUE_SIZE) {
 		printf("Freeflow WARNING: attempt to create a very large CQ. This may cause problems.\n");
 	}
@@ -816,25 +800,6 @@ LATEST_SYMVER_FUNC(ibv_create_qp, 1_1, "IBVERBS_1.1",
 	// 	map_cq_to_srq[qp->recv_cq->handle] = MAP_SIZE + 1;
 	// }
 
-	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
-	qp->shm_fd = fd;
-	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
-		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
-		fflush(stdout);
-	}
-	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
-	qp->shm_ptr = shm_p;
-	if (!shm_p) {
-		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
-		fflush(stdout);
-	} else {
-		printf("[INFO] Succeed to mount shm %s\n", rsp.shm_name);
-		fflush(stdout);
-	}
-
-	qp_shm_map[qp->handle] = (struct CtrlShmPiece *)shm_p;
-	pthread_mutex_init(&(qp_shm_mtx_map[qp->handle]), NULL); 
-
 	if (PRINT_LOG) {
 		printf("#### ibv_create_qp over ####\n");
 		printf("init_attr.qp_type = %d\n", qp_init_attr->qp_type);
@@ -910,9 +875,6 @@ LATEST_SYMVER_FUNC(ibv_destroy_qp, 1_1, "IBVERBS_1.1",
 	request_router(IBV_DESTROY_QP, &req_body, &rsp, &rsp_size);	
 
 	// TODO: clean up mempool
-	releaseShm(qp->shm_ptr, sizeof(struct CtrlShmPiece), qp->shm_fd);
-	qp_shm_map[qp->handle] = NULL;
-	pthread_mutex_destroy(&(qp_shm_mtx_map[qp->handle]));
 
 	return rsp.ret;
 }
@@ -1341,11 +1303,9 @@ LATEST_SYMVER_FUNC(ibv_post_send, 1_1, "IBVERBS_1.1",
 	uint32_t			*ah;
 	uint32_t			wr_count = 0, sge_count = 0, ah_count = 0;
 
-    struct CtrlShmPiece			*csp = qp_shm_map[qp->handle];
-    pthread_mutex_t				*csp_mtx = &(qp_shm_mtx_map[qp->handle]);
-	struct FfrRequestHeader		*header = (struct FfrRequestHeader*)(csp->req);
-	struct ib_uverbs_post_send	*cmd = (struct ib_uverbs_post_send*)(csp->req + sizeof(struct FfrRequestHeader));
-	struct IBV_POST_SEND_RSP	*rsp = (struct IBV_POST_SEND_RSP*)(csp->rsp + sizeof(struct FfrResponseHeader));
+	struct FfrRequestHeader		*header = calloc(1, sizeof(struct FfrRequestHeader));
+	struct ib_uverbs_post_send	*cmd = calloc(1, 4*1024);
+	struct IBV_POST_SEND_RSP	*rsp = calloc(1, sizeof(struct IBV_POST_SEND_RSP));
 	
 
     if (PRINT_LOG) {
@@ -1361,9 +1321,6 @@ LATEST_SYMVER_FUNC(ibv_post_send, 1_1, "IBVERBS_1.1",
 	if (qp->qp_type == IBV_QPT_UD) {
 		ah_count = wr_count;
 	}
-
-	// Entering critical section
-	pthread_mutex_lock(csp_mtx);
 
 	header->client_id = ffr_client_id;
 	header->func = IBV_POST_SEND;
@@ -1430,8 +1387,6 @@ LATEST_SYMVER_FUNC(ibv_post_send, 1_1, "IBVERBS_1.1",
 	}
 	
 	// wmb();
-	csp->state = IDLE;
-	pthread_mutex_unlock(csp_mtx);
 
 	return rsp->ret_errno;
 }
@@ -1450,11 +1405,9 @@ LATEST_SYMVER_FUNC(ibv_post_recv, 1_1, "IBVERBS_1.1",
 	struct sge_record		*sge_p;
 	struct wr_queue			*wr_queue;
 
-	struct CtrlShmPiece		*csp = qp_shm_map[qp->handle];
-	pthread_mutex_t			*csp_mtx = &(qp_shm_mtx_map[qp->handle]);
-	struct FfrRequestHeader	*header = (struct FfrRequestHeader*)(csp->req);
-	struct ib_uverbs_post_recv	*cmd = (struct ib_uverbs_post_recv*)(csp->req + sizeof(struct FfrRequestHeader));
-	struct IBV_POST_RECV_RSP	*rsp = (struct IBV_POST_RECV_RSP*)(csp->rsp + sizeof(struct FfrResponseHeader));
+	struct FfrRequestHeader		*header = calloc(1, sizeof(struct FfrRequestHeader));
+	struct ib_uverbs_post_send	*cmd = calloc(1, 4*1024);
+	struct IBV_POST_SEND_RSP	*rsp = calloc(1, sizeof(struct IBV_POST_SEND_RSP));
 
 	if (PRINT_LOG) {
 		printf("#### ibv_post_receive ####\n");
@@ -1465,9 +1418,6 @@ LATEST_SYMVER_FUNC(ibv_post_recv, 1_1, "IBVERBS_1.1",
 		wr_count++;
 		sge_count += i->num_sge;
 	}
-
-	// Entering critical section
-	pthread_mutex_lock(csp_mtx);
 
 	header->client_id = ffr_client_id;
 	header->func = IBV_POST_RECV;
@@ -1541,9 +1491,7 @@ LATEST_SYMVER_FUNC(ibv_post_recv, 1_1, "IBVERBS_1.1",
 		*bad_wr = wr;
 	}
 
-	// wmb();
-	csp->state = IDLE;
-	pthread_mutex_unlock(csp_mtx);
+
 
 	return rsp->ret_errno;
 }
@@ -1557,19 +1505,15 @@ LATEST_SYMVER_FUNC(ibv_poll_cq, 1_1, "IBVERBS_1.1",
 	struct wr_queue		*wr_queue;
 	struct wr			*wr_p;
 
-	struct CtrlShmPiece			*csp = cq_shm_map[cq->handle];
-	pthread_mutex_t				*csp_mtx = &(cq_shm_mtx_map[cq->handle]);
-	struct FfrRequestHeader		*req_header = (struct FfrRequestHeader*)(csp->req);
-	struct IBV_POLL_CQ_REQ		*req = (struct IBV_POLL_CQ_REQ*)(csp->req + sizeof(struct FfrRequestHeader));
-	struct FfrResponseHeader	*rsp_header = (struct FfrResponseHeader*)csp->rsp;
-	struct ibv_wc				*wc_list = (struct ibv_wc*)(csp->rsp + sizeof(struct FfrResponseHeader));
+	struct FfrRequestHeader		*req_header = calloc(1, sizeof(struct FfrRequestHeader));
+	struct IBV_POLL_CQ_REQ		*req = calloc(1, sizeof(struct IBV_POLL_CQ_REQ));
+	struct FfrResponseHeader	*rsp_header = calloc(1, sizeof(struct FfrResponseHeader));
+	struct ibv_wc				*wc_list = calloc(num_entries, sizeof(struct ibv_wc));
 
 	// if (PRINT_LOG) {
 	// 	printf("#### ibv_poll_cq ####\n");
 	// 	fflush(stdout);
 	// }
-
-	pthread_mutex_lock(csp_mtx);
 
 	req_header->client_id = ffr_client_id;
 	req_header->func = IBV_POLL_CQ;
@@ -1588,7 +1532,6 @@ LATEST_SYMVER_FUNC(ibv_poll_cq, 1_1, "IBVERBS_1.1",
 	if (rsp_header->rsp_size % sizeof(struct ibv_wc) != 0) {
 		printf("[Error] The rsp size is %d while the unit ibn_wc size is %d.", rsp_header->rsp_size, (int)sizeof(struct ibv_wc));
 		fflush(stdout);
-		pthread_mutex_unlock(csp_mtx);
 		return -1;
 	}
 
@@ -1676,12 +1619,10 @@ LATEST_SYMVER_FUNC(ibv_poll_cq, 1_1, "IBVERBS_1.1",
 	}
 
 	// wmb();
-	csp->state = IDLE;
 	// patch SRQ
 	// if (map_cq_to_srq[cq->handle] <= MAP_SIZE) {
 	// 	pthread_spin_unlock(&(map_srq_to_wr_queue[map_cq_to_srq[cq->handle]]->tail_lock));
 	// }
-	pthread_mutex_unlock(csp_mtx);
 
 	return count;
 }
@@ -1712,26 +1653,6 @@ LATEST_SYMVER_FUNC(ibv_restore_qp, 1_1, "IBVERBS_1.1",
 	struct IBV_RESTORE_QP_RSP rsp;
 	int rsp_size;
 	request_router(IBV_RESTORE_QP, &req_body, &rsp, &rsp_size);
-
-	printf("ibv_restore_qp: shm_name = %s\n", rsp.shm_name);
-	int fd = shm_open(rsp.shm_name, O_CREAT | O_RDWR, 0666);
-	qp->shm_fd = fd;
-	if (ftruncate(fd, sizeof(struct CtrlShmPiece))) {
-		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
-		fflush(stdout);
-	}
-	void* shm_p = mmap(0, sizeof(struct CtrlShmPiece), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_LOCKED, fd, 0);
-	qp->shm_ptr = shm_p;
-	if (!shm_p) {
-		printf("[Error] Fail to mount shm %s\n", rsp.shm_name);
-		fflush(stdout);
-	} else {
-		printf("[INFO] Succeed to mount shm %s\n", rsp.shm_name);
-		fflush(stdout);
-	}
-
-	qp_shm_map[qp->handle] = (struct CtrlShmPiece *)shm_p;
-	pthread_mutex_init(&(qp_shm_mtx_map[qp->handle]), NULL);
 
 	return 0;
 }

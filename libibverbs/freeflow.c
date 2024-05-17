@@ -65,11 +65,6 @@ struct sock_with_lock read_sock[PARALLEL_SIZE];
 struct sock_with_lock poll_sock[PARALLEL_SIZE];
 struct sock_with_lock event_sock[PARALLEL_SIZE];*/
 
-struct CtrlShmPiece* qp_shm_map[MAP_SIZE];
-struct CtrlShmPiece* cq_shm_map[MAP_SIZE];
-struct CtrlShmPiece* srq_shm_map[MAP_SIZE];
-pthread_mutex_t qp_shm_mtx_map[MAP_SIZE];
-pthread_mutex_t cq_shm_mtx_map[MAP_SIZE];
 int cq_event_sock_map[MAP_SIZE];
 struct sock_with_lock comp_channel_sock_map[MAP_SIZE];
 
@@ -331,11 +326,6 @@ void request_router(RDMA_FUNCTION_CALL req, void* req_body, void *rsp, int *rsp_
 	case IBV_REG_MR:
 		*rsp_size = sizeof(struct IBV_REG_MR_RSP);
 		header.body_size = sizeof(struct IBV_REG_MR_REQ);
-		break;
-
-	case IBV_REG_MR_MAPPING:
-		*rsp_size = sizeof(struct IBV_REG_MR_MAPPING_RSP);
-		header.body_size = sizeof(struct IBV_REG_MR_MAPPING_REQ);
 		break;
 
 	case IBV_DEREG_MR:

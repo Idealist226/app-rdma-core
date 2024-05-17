@@ -1235,10 +1235,6 @@ struct ibv_qp {
 	pthread_mutex_t		mutex;
 	pthread_cond_t		cond;
 	uint32_t		events_completed;
-
-	char shm_name[100];
-	void *shm_ptr;
-	int shm_fd;
 };
 
 struct ibv_qp_ex {

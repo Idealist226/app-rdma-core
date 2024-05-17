@@ -46,7 +46,6 @@ typedef enum RDMA_FUNCTION_CALL
 	IBV_REQ_NOTIFY_CQ,
 	
 	IBV_REG_MR,
-	IBV_REG_MR_MAPPING,
 	IBV_DEREG_MR,
 	
 	IBV_REG_CM,
@@ -223,6 +222,7 @@ struct IBV_REG_MR_REQ
 		uint32_t pd_handle;
 		uint32_t mem_size;
 		uint32_t access_flags;
+		char *addr;
 		char shm_name[100];
 };
 
@@ -714,20 +714,6 @@ struct CM_DISCONNECT_REQ
 struct CM_DISCONNECT_RSP
 {
 		int ret_errno;
-};
-
-enum CtrlChannelState
-{
-		IDLE,
-		REQ_DONE,
-		RSP_DONE,
-};
-
-struct CtrlShmPiece
-{
-		volatile enum CtrlChannelState state;
-		uint8_t req[CTRL_REQ_SIZE];
-		uint8_t rsp[CTRL_RSP_SIZE];
 };
 
 struct IBV_RESTORE_QP_REQ

@@ -34,7 +34,6 @@ void init_sock(void);
 struct sock_with_lock* get_unix_sock(RDMA_FUNCTION_CALL req);
 void connect_router(struct sock_with_lock *unix_sock);
 void request_router(RDMA_FUNCTION_CALL req, void* req_body, void *rsp, int *rsp_size);
-void request_router_shm(struct CtrlShmPiece *csp);
 
 extern struct sock_with_lock control_sock[PARALLEL_SIZE];
 extern struct sock_with_lock write_sock[PARALLEL_SIZE];
@@ -42,11 +41,6 @@ extern struct sock_with_lock read_sock[PARALLEL_SIZE];
 extern struct sock_with_lock poll_sock[PARALLEL_SIZE];
 extern struct sock_with_lock event_sock[PARALLEL_SIZE];
 
-extern struct CtrlShmPiece* qp_shm_map[MAP_SIZE];
-extern struct CtrlShmPiece* cq_shm_map[MAP_SIZE];
-extern struct CtrlShmPiece* srq_shm_map[MAP_SIZE];
-extern pthread_mutex_t qp_shm_mtx_map[MAP_SIZE];
-extern pthread_mutex_t cq_shm_mtx_map[MAP_SIZE];
 extern struct sock_with_lock comp_channel_sock_map[MAP_SIZE];
 extern int comp_channel_map[MAP_SIZE];
 
