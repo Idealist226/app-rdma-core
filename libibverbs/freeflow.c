@@ -420,10 +420,6 @@ void request_router(RDMA_FUNCTION_CALL req, void* req_body, void *rsp, int *rsp_
 	// 	*rsp_size = sizeof(struct IBV_DESTROY_SRQ_RSP);
 	// 	header.body_size = sizeof(struct IBV_DESTROY_SRQ_REQ);
 	// 	break;
-	case IBV_RESTORE_QP:
-		*rsp_size = sizeof(struct IBV_RESTORE_QP_RSP);
-		header.body_size = sizeof(struct IBV_RESTORE_QP_REQ);
-		break;
 
 	default:
 		goto end;

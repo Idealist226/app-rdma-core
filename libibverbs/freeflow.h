@@ -17,7 +17,6 @@ extern void* mempool_get(void* mempool, uint32_t k);
 extern void mempool_destroy(void* mempool);
 
 extern int ffr_client_id;
-extern int ibv_cmd_reg_mr_ff(struct ibv_pd *pd, void **addr, size_t length, int access, char *shm_name, struct ibv_mr *mr);
 
 
 /**

@@ -1626,33 +1626,3 @@ LATEST_SYMVER_FUNC(ibv_poll_cq, 1_1, "IBVERBS_1.1",
 
 	return count;
 }
-
-LATEST_SYMVER_FUNC(ibv_restore_qp, 1_1, "IBVERBS_1.1",
-			int,
-			struct ibv_qp *qp,
-			struct ibv_pd *pd,
-			struct ibv_qp_init_attr *qp_init_attr,
-			struct ibv_qp_attr *attr)
-{
-	if (PRINT_LOG) {
-		printf("#### ibv_restore_qp ####\n");
-		printf("ibv_restore_qp: qp->handle = %d\n", qp->handle);
-		printf("ibv_restore_qp: qp->num = %d\n", qp->qp_num);
-		fflush(stdout);
-	}
-
-	struct IBV_RESTORE_QP_REQ req_body;
-	req_body.pd_handle = pd->handle;
-	req_body.send_cq_handle = qp_init_attr->send_cq->handle;
-	req_body.recv_cq_handle = qp_init_attr->recv_cq->handle;
-	req_body.lid = attr->ah_attr.dlid;
-	req_body.qpn = attr->dest_qp_num;
-	req_body.gid = attr->ah_attr.grh.dgid;
-	req_body.qp_handle = qp->handle;
-
-	struct IBV_RESTORE_QP_RSP rsp;
-	int rsp_size;
-	request_router(IBV_RESTORE_QP, &req_body, &rsp, &rsp_size);
-
-	return 0;
-}

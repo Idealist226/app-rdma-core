@@ -3041,11 +3041,6 @@ int ibv_query_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
  */
 int ibv_destroy_qp(struct ibv_qp *qp);
 
-int ibv_restore_qp(struct ibv_qp *qp,
-			struct ibv_pd *pd,
-			struct ibv_qp_init_attr *qp_init_attr,
-			struct ibv_qp_attr *attr);
-
 /*
  * ibv_create_wq - Creates a WQ associated with the specified protection
  * domain.

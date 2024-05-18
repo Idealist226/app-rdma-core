@@ -90,8 +90,6 @@ typedef enum RDMA_FUNCTION_CALL
 	CM_MIGRATE_ID,
 	CM_DISCONNECT,
 
-	IBV_RESTORE_QP,
-
 } RDMA_FUNCTION_CALL;
 
 struct FfrRequestHeader
@@ -164,7 +162,6 @@ struct IBV_CREATE_CQ_RSP
 {
 		uint32_t cqe;
 		uint32_t handle;
-		char shm_name[100];
 };
 
 struct IBV_DESTROY_CQ_REQ
@@ -204,7 +201,6 @@ struct IBV_CREATE_QP_RSP
 		uint32_t qp_num;
 		uint32_t handle;
 		struct ibv_qp_cap cap;
-		char shm_name[100];
 };
 
 struct IBV_DESTROY_QP_REQ
@@ -714,22 +710,6 @@ struct CM_DISCONNECT_REQ
 struct CM_DISCONNECT_RSP
 {
 		int ret_errno;
-};
-
-struct IBV_RESTORE_QP_REQ
-{
-	uint32_t pd_handle;
-	uint32_t send_cq_handle;
-	uint32_t recv_cq_handle;
-	uint16_t	lid;
-	uint32_t	qpn;
-	union ibv_gid		gid;
-	uint32_t	qp_handle;
-};
-
-struct IBV_RESTORE_QP_RSP
-{
-	char shm_name[100];
 };
 
 #endif /* FREEFLOW_TYPES_H */
